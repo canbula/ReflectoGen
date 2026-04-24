@@ -32,6 +32,8 @@ from typing import List, Tuple, Optional
 import numpy as np
 from PIL import Image, ImageDraw
 
+__version__ = "1.0.0"
+
 
 # -----------------------------------------------------------------------------
 # Core generator
@@ -957,6 +959,7 @@ def build_parser() -> argparse.ArgumentParser:
     """
 
     p = argparse.ArgumentParser(description="ReflectoGen: physics-inspired and calibration-enabled reflectogram synthesis for pile integrity testing.")
+    p.add_argument("--version", action="version", version=f"ReflectoGen {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pc = sub.add_parser("calibrate", help="Fit global generator parameters to a zip/folder of existing reflectograms.")
