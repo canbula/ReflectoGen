@@ -176,7 +176,7 @@ The calibration command fits selected global generator parameters to an existing
 
 ```bash
 python reflectogen.py calibrate \
-  --input reflectograms_balanced_1000.zip \
+  --input reflectograms.zip \
   --out calibration_outputs \
   --max-images 250 \
   --stages 3 \
@@ -469,8 +469,6 @@ If you use ReflectoGen in a publication, please cite the associated SoftwareX pa
 ---
 
 ## License
-
-Add the final repository license here, for example:
 
 ```text
 MIT License
