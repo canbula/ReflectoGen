@@ -1,0 +1,4 @@
+ReflectoGen generates open synthetic LSPIT reflectograms in Python.
+The model links 1D impedance changes to rendered traces and CSV outputs.
+Legacy reflectogram archives can calibrate global generator parameters.
+The package supports benchmarks, ablations, and ML dataset generation.

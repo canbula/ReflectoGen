@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use ReflectoGen, please cite the archived software release and the associated SoftwareX article when available."
+title: "ReflectoGen: Physics-Inspired and Calibration-Enabled Reflectogram Synthesis for Pile Integrity Testing"
+type: software
+version: "1.0.0"
+license: MIT
+repository-code: "https://github.com/canbula/ReflectoGen"
+url: "https://github.com/canbula/ReflectoGen"
+authors:
+  - family-names: Canbula
+    given-names: Bora
+    email: bora.canbula@cbu.edu.tr
+  - family-names: Öztürk
+    given-names: Övünç
+  - family-names: Özacar
+    given-names: Vehbi
+  - family-names: Özacar
+    given-names: Tuğba
+abstract: >-
+  ReflectoGen is a calibration-enabled, physics-inspired Python software package
+  for generating synthetic reflectograms for low-strain pile integrity testing.
+  It supports single-case generation, batch dataset construction, optional
+  waveform/profile CSV export, and archive-based calibration of global generator
+  parameters.
+keywords:
+  - low-strain pile integrity testing
+  - reflectogram synthesis
+  - synthetic data
+  - calibration-enabled software
+  - Python

@@ -1,0 +1,40 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local outputs
+outputs/*
+!outputs/.gitkeep
+calibration_outputs/
+generated_reflectograms/
+generated_calibrated/
+synthetic_archive/
+calibration_run/
+
+# Generated sidecars
+*.signal.csv
+*.profile.csv
+*.meta.json
+manifest.json
+fit_summary.json
+search_history.csv
+fit_records.csv
+fit_preview.png
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
