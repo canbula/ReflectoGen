@@ -4,8 +4,8 @@ Use this table to update the manuscript after the public release and archive are
 
 | Nr | Code metadata description | Metadata |
 |---|---|---|
-| C1 | Current code version | v1.0.0 |
-| C2 | Permanent link to code/repository used for this code version | https://github.com/canbula/ReflectoGen/releases/tag/v1.0.0 |
+| C1 | Current code version | v1.0.1 |
+| C2 | Permanent link to code/repository used for this code version | https://github.com/canbula/ReflectoGen/releases/tag/v1.0.1 |
 | C3 | Permanent link to reproducible capsule | Not available |
 | C4 | Legal code license | MIT License |
 | C5 | Code versioning system used | git |

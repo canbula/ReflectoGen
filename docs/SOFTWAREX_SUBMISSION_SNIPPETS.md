@@ -4,11 +4,11 @@ These snippets are draft text blocks for the manuscript. Replace placeholders be
 
 ## Code availability
 
-The source code for ReflectoGen v1.0.0 is publicly available in the canbula/ReflectoGen GitHub repository and archived at Zenodo with DOI `10.5281/zenodo.xxxxx`. The archived release corresponds to the version described in this manuscript.
+The source code for ReflectoGen v1.0.1 is publicly available in the canbula/ReflectoGen GitHub repository and archived at Zenodo with DOI `10.5281/zenodo.xxxxx`. The archived release corresponds to the version described in this manuscript.
 
 ## Software citation
 
-B. Canbula, Ö. Öztürk, V. Özacar, T. Özacar, ReflectoGen v1.0.0 [software]. Zenodo; 2026. doi:`10.5281/zenodo.xxxxx`.
+B. Canbula, Ö. Öztürk, V. Özacar, T. Özacar, ReflectoGen v1.0.1 [software]. Zenodo; 2026. doi:`10.5281/zenodo.xxxxx`.
 
 ## Data availability
 

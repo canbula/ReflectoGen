@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use ReflectoGen, please cite the archived software release and the associated SoftwareX article when available."
 title: "ReflectoGen: Physics-Inspired and Calibration-Enabled Reflectogram Synthesis for Pile Integrity Testing"
 type: software
-version: "1.0.0"
+version: "1.0.1"
 license: MIT
 repository-code: "https://github.com/canbula/ReflectoGen"
 url: "https://github.com/canbula/ReflectoGen"

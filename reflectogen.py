@@ -27,12 +27,15 @@ import random
 import zipfile
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
+
+DEFAULT_PIXEL_LOSS_WEIGHT = 0.35
+DEFAULT_TRACE_LOSS_WEIGHT = 0.65
 
 
 # -----------------------------------------------------------------------------
@@ -348,6 +351,117 @@ def synthesize_signal(
     return t_final, signal.astype(np.float32), z.astype(np.float32), area.astype(np.float32)
 
 
+
+def synthesize_signal_from_profile(
+    cfg: GeneratorConfig,
+    z: np.ndarray,
+    area: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate a normalized response signal from an arbitrary area profile.
+
+    This function exposes the impedance engine independently of the built-in
+    rectangular, round, and triangular envelopes. It is useful for user-defined
+    profiles, irregular defects, or multiple adjacent anomalies supplied as a
+    depth-area CSV file.
+
+    Parameters
+    ----------
+    cfg:
+        Generator configuration.
+    z:
+        One-dimensional axial coordinate vector in meters. Values must be
+        monotonically increasing.
+    area:
+        Cross-sectional area profile in square meters sampled at ``z``.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        ``(time_s, signal)`` where ``signal`` is normalized and stored as
+        ``float32``.
+
+    Raises
+    ------
+    ValueError
+        If ``z`` and ``area`` have incompatible shapes or if ``z`` is not
+        strictly increasing.
+    """
+
+    z = np.asarray(z, dtype=np.float64)
+    area = np.asarray(area, dtype=np.float64)
+    if z.ndim != 1 or area.ndim != 1 or z.shape != area.shape:
+        raise ValueError("z and area must be one-dimensional arrays with equal length.")
+    if len(z) < 2:
+        raise ValueError("At least two profile points are required.")
+    if not np.all(np.diff(z) > 0):
+        raise ValueError("z values must be strictly increasing.")
+
+    event_times, event_amps = compute_reflection_impulses(cfg, z, area)
+    t_end = cfg.t_margin_factor * (2.0 * cfg.pile_length_m / cfg.wave_speed_m_s)
+    n_hi = cfg.n_samples * cfg.oversample_factor
+    t = np.linspace(0.0, t_end, n_hi, dtype=np.float64)
+    dt = t[1] - t[0]
+
+    impulse = np.zeros_like(t)
+    idx = np.clip(np.round(event_times / dt).astype(int), 0, n_hi - 1)
+    np.add.at(impulse, idx, event_amps)
+
+    wavelet_half = int(round(0.002 / dt))
+    tau = np.arange(-wavelet_half, wavelet_half + 1, dtype=np.float64) * dt
+    wavelet = ricker_wavelet(tau, cfg.f0_hz)
+    signal_hi = np.convolve(impulse, wavelet, mode="same")
+    signal_hi *= np.exp(-cfg.damping_alpha * t)
+
+    signal = signal_hi.reshape(cfg.n_samples, cfg.oversample_factor).mean(axis=1)
+    t_final = np.linspace(0.0, t_end, cfg.n_samples, dtype=np.float64)
+    signal = signal - np.mean(signal[: max(8, cfg.n_samples // 50)])
+    mx = np.max(np.abs(signal))
+    if mx > 0:
+        signal = signal / mx
+    return t_final, signal.astype(np.float32)
+
+
+def load_area_profile_csv(path: str | Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Load a user-defined axial area profile from CSV.
+
+    The CSV must contain ``z_m`` and ``area_m2`` columns. It may be used by the
+    ``profile`` subcommand to synthesize reflectograms from arbitrary impedance
+    profiles instead of the built-in parametric defect envelopes.
+
+    Parameters
+    ----------
+    path:
+        CSV file containing axial coordinates and area values.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        ``(z_m, area_m2)`` arrays sorted by increasing ``z_m``.
+
+    Raises
+    ------
+    ValueError
+        If required columns are missing or if fewer than two valid rows are
+        available.
+    """
+
+    profile_path = Path(path)
+    rows = []
+    with profile_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        required = {"z_m", "area_m2"}
+        if not required.issubset(reader.fieldnames or set()):
+            raise ValueError("Area-profile CSV must contain columns: z_m, area_m2")
+        for row in reader:
+            rows.append((float(row["z_m"]), float(row["area_m2"])))
+
+    if len(rows) < 2:
+        raise ValueError("Area-profile CSV must contain at least two valid rows.")
+    rows.sort(key=lambda item: item[0])
+    z = np.array([item[0] for item in rows], dtype=np.float64)
+    area = np.array([item[1] for item in rows], dtype=np.float64)
+    return z, area
+
 def render_reflectogram(cfg: GeneratorConfig, signal: np.ndarray) -> Image.Image:
     """Render a one-dimensional signal as a grayscale reflectogram image.
 
@@ -415,12 +529,102 @@ def generate_image_array(
 # -----------------------------------------------------------------------------
 # IO helpers
 # -----------------------------------------------------------------------------
-def load_records(source: str, max_images: Optional[int] = None, seed: int = 42) -> List[Record]:
+def load_metadata_csv(path: Optional[str]) -> Dict[str, Tuple[str, float, float, float]]:
+    """Load optional calibration metadata from a CSV file.
+
+    The CSV may contain either ``filename`` or ``relative_path`` as the image
+    identifier. Required parameter columns are ``shape``, ``start_m``,
+    ``end_m``, and ``percent_change``. The returned dictionary stores both the
+    supplied identifier and its basename so that directory and ZIP archives can
+    be matched robustly.
+
+    Parameters
+    ----------
+    path:
+        Optional CSV path. If ``None`` or empty, an empty dictionary is returned.
+
+    Returns
+    -------
+    dict
+        Mapping from image identifier to ``(shape, start_m, end_m,
+        percent_change)``.
+
+    Raises
+    ------
+    ValueError
+        If the CSV is missing the required metadata columns.
+    """
+
+    if not path:
+        return {}
+
+    csv_path = Path(path)
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = set(reader.fieldnames or [])
+        required = {"shape", "start_m", "end_m", "percent_change"}
+        if not required.issubset(fieldnames):
+            raise ValueError(f"Metadata CSV must contain columns: {sorted(required)}")
+        if "filename" not in fieldnames and "relative_path" not in fieldnames:
+            raise ValueError("Metadata CSV must contain either 'filename' or 'relative_path'.")
+
+        metadata: Dict[str, Tuple[str, float, float, float]] = {}
+        for row in reader:
+            identifier = row.get("relative_path") or row.get("filename") or ""
+            identifier = identifier.strip()
+            if not identifier:
+                continue
+            params = (
+                str(row["shape"]),
+                float(row["start_m"]),
+                float(row["end_m"]),
+                float(row["percent_change"]),
+            )
+            metadata[identifier] = params
+            metadata[Path(identifier).name] = params
+    return metadata
+
+
+def metadata_or_filename_params(
+    identifier: str,
+    metadata: Dict[str, Tuple[str, float, float, float]],
+) -> Tuple[str, float, float, float]:
+    """Return defect parameters from metadata CSV or filename parsing.
+
+    Parameters
+    ----------
+    identifier:
+        Image filename or archive-relative path.
+    metadata:
+        Optional metadata mapping produced by :func:`load_metadata_csv`.
+
+    Returns
+    -------
+    tuple
+        ``(shape, start_m, end_m, percent_change)``.
+    """
+
+    base = Path(identifier).name
+    if identifier in metadata:
+        return metadata[identifier]
+    if base in metadata:
+        return metadata[base]
+    return parse_filename(base)
+
+
+def load_records(
+    source: str,
+    max_images: Optional[int] = None,
+    seed: int = 42,
+    metadata_csv: Optional[str] = None,
+) -> List[Record]:
     """Load existing reflectogram images for calibration.
 
-    The source may be a directory or a ZIP archive. Filenames are parsed to
-    extract defect metadata using :func:`parse_filename`. Invalid filenames are
-    skipped. Images are loaded as grayscale arrays normalized to [0, 1].
+    The source may be a directory or a ZIP archive. By default, filenames are
+    parsed to extract defect metadata using :func:`parse_filename`. If a
+    metadata CSV is supplied, its metadata are used first and filenames are used
+    as a fallback. Invalid or unmatched images are skipped. Images are loaded as
+    grayscale arrays normalized to [0, 1].
 
     Parameters
     ----------
@@ -431,31 +635,35 @@ def load_records(source: str, max_images: Optional[int] = None, seed: int = 42) 
         subset is selected for faster calibration.
     seed:
         Random seed used when subsampling records.
+    metadata_csv:
+        Optional CSV file containing ``filename`` or ``relative_path`` together
+        with ``shape``, ``start_m``, ``end_m``, and ``percent_change`` columns.
 
     Returns
     -------
     list of Record
-        Calibration records containing parsed metadata and image arrays.
+        Calibration records containing metadata and image arrays.
     """
 
     path = Path(source)
+    metadata = load_metadata_csv(metadata_csv)
     records: List[Record] = []
     if path.is_dir():
         names = sorted([p for p in path.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
-        for p in names:
+        for pth in names:
             try:
-                shape, start, end, pct = parse_filename(p.name)
+                shape, start, end, pct = metadata_or_filename_params(pth.name, metadata)
             except Exception:
                 continue
-            arr = np.asarray(Image.open(p).convert("L"), dtype=np.float32) / 255.0
-            records.append(Record(p.name, shape, start, end, pct, arr))
+            arr = np.asarray(Image.open(pth).convert("L"), dtype=np.float32) / 255.0
+            records.append(Record(pth.name, shape, start, end, pct, arr))
     else:
         with zipfile.ZipFile(path) as zf:
             names = [n for n in sorted(zf.namelist()) if n.lower().endswith((".png", ".jpg", ".jpeg"))]
             for name in names:
                 base = Path(name).name
                 try:
-                    shape, start, end, pct = parse_filename(base)
+                    shape, start, end, pct = metadata_or_filename_params(name, metadata)
                 except Exception:
                     continue
                 with zf.open(name) as f:
@@ -468,7 +676,6 @@ def load_records(source: str, max_images: Optional[int] = None, seed: int = 42) 
         records = rng.sample(records, max_images)
         records = sorted(records, key=lambda r: r.filename)
     return records
-
 
 def make_name(shape: str, start_m: float, end_m: float, percent_change: float) -> str:
     """Create a reflectogram filename from defect parameters.
@@ -581,12 +788,18 @@ def trace_from_image(arr: np.ndarray) -> np.ndarray:
     return trace / max(h - 1, 1)
 
 
-def image_distance(target: np.ndarray, pred: np.ndarray) -> float:
+def image_distance(
+    target: np.ndarray,
+    pred: np.ndarray,
+    pixel_weight: float = DEFAULT_PIXEL_LOSS_WEIGHT,
+    trace_weight: float = DEFAULT_TRACE_LOSS_WEIGHT,
+) -> float:
     """Compute a combined image and trace similarity loss.
 
     The calibration loss combines pixel-level mean squared error with a trace
-    centerline mean squared error. The trace term is weighted more strongly to
-    emphasize waveform shape and vertical trajectory alignment.
+    centerline mean squared error. The default weights emphasize waveform
+    trajectory agreement over raw background-pixel overlap, but the weights are
+    user-adjustable through the calibration command.
 
     Parameters
     ----------
@@ -594,21 +807,44 @@ def image_distance(target: np.ndarray, pred: np.ndarray) -> float:
         Reference reflectogram image normalized to [0, 1].
     pred:
         Generated reflectogram image normalized to [0, 1].
+    pixel_weight:
+        Relative weight assigned to pixel-level mean squared error.
+    trace_weight:
+        Relative weight assigned to trace-centerline mean squared error.
 
     Returns
     -------
     float
         Weighted distance value; lower values indicate closer agreement.
+
+    Raises
+    ------
+    ValueError
+        If both weights are zero or negative.
     """
 
     if target.shape != pred.shape:
-        target = np.asarray(Image.fromarray((target * 255).astype(np.uint8)).resize(pred.shape[::-1], Image.BILINEAR), dtype=np.float32) / 255.0
+        resized = Image.fromarray((target * 255).astype(np.uint8)).resize(
+            pred.shape[::-1],
+            Image.BILINEAR,
+        )
+        target = np.asarray(resized, dtype=np.float32) / 255.0
+
+    weight_sum = pixel_weight + trace_weight
+    if weight_sum <= 0:
+        raise ValueError("pixel_weight + trace_weight must be positive.")
+
     pixel_mse = float(np.mean((target - pred) ** 2))
     trace_mse = float(np.mean((trace_from_image(target) - trace_from_image(pred)) ** 2))
-    return 0.35 * pixel_mse + 0.65 * trace_mse
+    return (pixel_weight * pixel_mse + trace_weight * trace_mse) / weight_sum
 
 
-def evaluate_config(cfg: GeneratorConfig, records: List[Record]) -> Tuple[float, List[float]]:
+def evaluate_config(
+    cfg: GeneratorConfig,
+    records: List[Record],
+    pixel_weight: float = DEFAULT_PIXEL_LOSS_WEIGHT,
+    trace_weight: float = DEFAULT_TRACE_LOSS_WEIGHT,
+) -> Tuple[float, List[float]]:
     """Evaluate one generator configuration against calibration records.
 
     Parameters
@@ -617,6 +853,10 @@ def evaluate_config(cfg: GeneratorConfig, records: List[Record]) -> Tuple[float,
         Candidate generator configuration.
     records:
         Calibration records with target images and parsed metadata.
+    pixel_weight:
+        Relative weight assigned to pixel-level error.
+    trace_weight:
+        Relative weight assigned to trace-centerline error.
 
     Returns
     -------
@@ -627,7 +867,7 @@ def evaluate_config(cfg: GeneratorConfig, records: List[Record]) -> Tuple[float,
     losses = []
     for rec in records:
         pred = generate_image_array(cfg, rec.shape, rec.start_m, rec.end_m, rec.percent_change)
-        losses.append(image_distance(rec.image, pred))
+        losses.append(image_distance(rec.image, pred, pixel_weight, trace_weight))
     return float(np.mean(losses)), losses
 
 
@@ -718,7 +958,14 @@ def make_preview(records: List[Record], cfg: GeneratorConfig, out_path: Path, n_
     canvas = Image.new("L", (cell_w * 2, cell_h * len(sample)), 255)
     for i, rec in enumerate(sample):
         target = Image.fromarray((rec.image * 255).astype(np.uint8))
-        pred = Image.fromarray((generate_image_array(cfg, rec.shape, rec.start_m, rec.end_m, rec.percent_change) * 255).astype(np.uint8))
+        generated = generate_image_array(
+            cfg,
+            rec.shape,
+            rec.start_m,
+            rec.end_m,
+            rec.percent_change,
+        )
+        pred = Image.fromarray((generated * 255).astype(np.uint8))
         if target.size != (cell_w, cell_h):
             target = target.resize((cell_w, cell_h), Image.BILINEAR)
         canvas.paste(target, (0, i * cell_h))
@@ -727,13 +974,51 @@ def make_preview(records: List[Record], cfg: GeneratorConfig, out_path: Path, n_
     canvas.save(out_path)
 
 
+def write_parameter_correlation(history: List[dict], out_path: Path) -> None:
+    """Write a simple correlation matrix for searched calibration parameters.
+
+    The matrix is intended as a lightweight identifiability diagnostic. High
+    absolute correlations between the loss and multiple parameters indicate that
+    different parameter combinations may explain the same archive similarly.
+
+    Parameters
+    ----------
+    history:
+        Calibration search history rows.
+    out_path:
+        Output CSV path for the correlation matrix.
+    """
+
+    columns = ["loss", *PARAM_RANGES.keys()]
+    numeric_rows = []
+    for row in history:
+        try:
+            numeric_rows.append([float(row[col]) for col in columns])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["parameter", *columns])
+        if len(numeric_rows) < 3:
+            for col in columns:
+                writer.writerow([col, *["nan" for _ in columns]])
+            return
+
+        arr = np.asarray(numeric_rows, dtype=np.float64)
+        corr = np.corrcoef(arr, rowvar=False)
+        for name, values in zip(columns, corr):
+            writer.writerow([name, *[f"{value:.6f}" for value in values]])
+
+
 def cmd_calibrate(args: argparse.Namespace) -> None:
     """Run command-line calibration against an existing reflectogram archive.
 
     The function loads target records from a directory or ZIP file, evaluates the
     default configuration, performs staged random search with local refinement,
-    saves the best configuration, writes search history and per-record losses,
-    and creates a visual fit preview.
+    saves the best configuration, writes search history, per-record losses,
+    a parameter-correlation diagnostic, and creates a visual fit preview.
 
     Parameters
     ----------
@@ -741,7 +1026,12 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         Parsed command-line arguments for the ``calibrate`` subcommand.
     """
 
-    records = load_records(args.input, max_images=args.max_images, seed=args.seed)
+    records = load_records(
+        args.input,
+        max_images=args.max_images,
+        seed=args.seed,
+        metadata_csv=args.metadata_csv,
+    )
     if not records:
         raise RuntimeError("No reflectogram images could be loaded from the given input.")
 
@@ -751,23 +1041,48 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
 
     default_cfg = GeneratorConfig(render_width=records[0].image.shape[1], render_height=records[0].image.shape[0])
     best_cfg = default_cfg
-    best_loss, _ = evaluate_config(best_cfg, records)
+    best_loss, _ = evaluate_config(
+        best_cfg,
+        records,
+        pixel_weight=args.pixel_weight,
+        trace_weight=args.trace_weight,
+    )
     history = [{"stage": "default", "loss": best_loss, **asdict(best_cfg)}]
     print(f"[INFO] Default loss: {best_loss:.6f}")
 
     for stage in range(args.stages):
         sigma = 1.0 if stage == 0 else max(0.15, 0.55 / stage)
         for trial in range(args.trials_per_stage):
-            cand = sample_random_config(rng, None if stage == 0 else best_cfg, sigma_scale=sigma)
-            cand = GeneratorConfig(**{**asdict(cand), "render_width": default_cfg.render_width, "render_height": default_cfg.render_height})
-            loss, _ = evaluate_config(cand, records)
+            cand = sample_random_config(
+                rng,
+                None if stage == 0 else best_cfg,
+                sigma_scale=sigma,
+            )
+            cand = GeneratorConfig(
+                **{
+                    **asdict(cand),
+                    "render_width": default_cfg.render_width,
+                    "render_height": default_cfg.render_height,
+                }
+            )
+            loss, _ = evaluate_config(
+                cand,
+                records,
+                pixel_weight=args.pixel_weight,
+                trace_weight=args.trace_weight,
+            )
             history.append({"stage": f"stage_{stage+1}", "trial": trial + 1, "loss": loss, **asdict(cand)})
             if loss < best_loss:
                 best_loss = loss
                 best_cfg = cand
                 print(f"[INFO] New best at stage {stage+1} trial {trial+1}: {best_loss:.6f}")
 
-    final_loss, losses = evaluate_config(best_cfg, records)
+    final_loss, losses = evaluate_config(
+        best_cfg,
+        records,
+        pixel_weight=args.pixel_weight,
+        trace_weight=args.trace_weight,
+    )
     summary = {
         "n_records": len(records),
         "mean_loss": final_loss,
@@ -775,6 +1090,9 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         "min_loss": float(np.min(losses)),
         "max_loss": float(np.max(losses)),
         "best_config": asdict(best_cfg),
+        "pixel_weight": args.pixel_weight,
+        "trace_weight": args.trace_weight,
+        "metadata_csv": args.metadata_csv,
     }
 
     json_save(out_dir / "best_config.json", asdict(best_cfg))
@@ -784,6 +1102,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(history)
+    write_parameter_correlation(history, out_dir / "parameter_correlation.csv")
     with (out_dir / "fit_records.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["filename", "shape", "start_m", "end_m", "percent_change", "loss"])
@@ -853,7 +1172,13 @@ def cmd_one(args: argparse.Namespace) -> None:
     """
 
     cfg = load_config_json(args.config_json)
-    cfg = GeneratorConfig(**{**asdict(cfg), "render_width": args.width or cfg.render_width, "render_height": args.height or cfg.render_height})
+    cfg = GeneratorConfig(
+        **{
+            **asdict(cfg),
+            "render_width": args.width or cfg.render_width,
+            "render_height": args.height or cfg.render_height,
+        }
+    )
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     t, signal, z, area = synthesize_signal(cfg, args.shape, args.start, args.end, args.percent)
@@ -862,7 +1187,16 @@ def cmd_one(args: argparse.Namespace) -> None:
         save_signal_csv(out_path.with_suffix(".signal.csv"), t, signal)
     if args.save_profile_csv:
         save_profile_csv(out_path.with_suffix(".profile.csv"), z, area)
-    json_save(out_path.with_suffix(".meta.json"), {"shape": args.shape, "start_m": args.start, "end_m": args.end, "percent_change": args.percent, **asdict(cfg)})
+    json_save(
+        out_path.with_suffix(".meta.json"),
+        {
+            "shape": args.shape,
+            "start_m": args.start,
+            "end_m": args.end,
+            "percent_change": args.percent,
+            **asdict(cfg),
+        },
+    )
 
 
 def cmd_batch(args: argparse.Namespace) -> None:
@@ -880,7 +1214,13 @@ def cmd_batch(args: argparse.Namespace) -> None:
     """
 
     cfg = load_config_json(args.config_json)
-    cfg = GeneratorConfig(**{**asdict(cfg), "render_width": args.width or cfg.render_width, "render_height": args.height or cfg.render_height})
+    cfg = GeneratorConfig(
+        **{
+            **asdict(cfg),
+            "render_width": args.width or cfg.render_width,
+            "render_height": args.height or cfg.render_height,
+        }
+    )
     csv_path = Path(args.csv)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -905,9 +1245,54 @@ def cmd_batch(args: argparse.Namespace) -> None:
             save_signal_csv(out_path.with_suffix(".signal.csv"), t, signal)
         if args.save_profile_csv:
             save_profile_csv(out_path.with_suffix(".profile.csv"), z, area)
-        manifest.append({"filename": name, "shape": shape, "start_m": start, "end_m": end, "percent_change": pct})
+        manifest.append(
+            {
+                "filename": name,
+                "shape": shape,
+                "start_m": start,
+                "end_m": end,
+                "percent_change": pct,
+            }
+        )
 
     json_save(out_dir / "manifest.json", manifest)
+
+
+
+def cmd_profile(args: argparse.Namespace) -> None:
+    """Generate one reflectogram from a user-supplied area-profile CSV.
+
+    Parameters
+    ----------
+    args:
+        Parsed command-line arguments for the ``profile`` subcommand.
+    """
+
+    cfg = load_config_json(args.config_json)
+    cfg = GeneratorConfig(
+        **{
+            **asdict(cfg),
+            "render_width": args.width or cfg.render_width,
+            "render_height": args.height or cfg.render_height,
+        }
+    )
+    z, area = load_area_profile_csv(args.profile_csv)
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    t, signal = synthesize_signal_from_profile(cfg, z, area)
+    render_reflectogram(cfg, signal).save(out_path)
+    if args.save_signal_csv:
+        save_signal_csv(out_path.with_suffix(".signal.csv"), t, signal)
+    if args.save_profile_csv:
+        save_profile_csv(out_path.with_suffix(".profile.csv"), z, area)
+    json_save(
+        out_path.with_suffix(".meta.json"),
+        {
+            "profile_csv": str(args.profile_csv),
+            "mode": "user_defined_area_profile",
+            **asdict(cfg),
+        },
+    )
 
 
 def cmd_template(args: argparse.Namespace) -> None:
@@ -954,21 +1339,51 @@ def build_parser() -> argparse.ArgumentParser:
     Returns
     -------
     argparse.ArgumentParser
-        Parser with ``calibrate``, ``one``, ``batch``, and ``template``
-        subcommands.
+        Parser with ``calibrate``, ``one``, ``batch``, ``profile``, and
+        ``template`` subcommands.
     """
 
-    p = argparse.ArgumentParser(description="ReflectoGen: physics-inspired and calibration-enabled reflectogram synthesis for pile integrity testing.")
+    p = argparse.ArgumentParser(
+        description=(
+            "ReflectoGen: physics-inspired and calibration-enabled "
+            "reflectogram synthesis for pile integrity testing."
+        )
+    )
     p.add_argument("--version", action="version", version=f"ReflectoGen {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pc = sub.add_parser("calibrate", help="Fit global generator parameters to a zip/folder of existing reflectograms.")
-    pc.add_argument("--input", type=str, required=True, help="Zip file or directory containing reflectograms named Shape_start_end_percent.png")
+    pc = sub.add_parser(
+        "calibrate",
+        help="Fit global generator parameters to a zip/folder of reflectograms.",
+    )
+    pc.add_argument(
+        "--input",
+        type=str,
+        required=True,
+        help="Zip file or directory containing calibration reflectograms.",
+    )
     pc.add_argument("--out", type=str, required=True)
-    pc.add_argument("--max-images", type=int, default=250, help="Use a random subset for faster calibration.")
+    pc.add_argument(
+        "--max-images",
+        type=int,
+        default=250,
+        help="Use a random subset for faster calibration.",
+    )
     pc.add_argument("--stages", type=int, default=3)
     pc.add_argument("--trials-per-stage", type=int, default=80)
     pc.add_argument("--seed", type=int, default=42)
+    pc.add_argument(
+        "--metadata-csv",
+        type=str,
+        default=None,
+        help=(
+            "Optional CSV containing filename/relative_path, shape, start_m, "
+            "end_m, and percent_change for archives whose filenames do not "
+            "encode metadata."
+        ),
+    )
+    pc.add_argument("--pixel-weight", type=float, default=DEFAULT_PIXEL_LOSS_WEIGHT)
+    pc.add_argument("--trace-weight", type=float, default=DEFAULT_TRACE_LOSS_WEIGHT)
     pc.set_defaults(func=cmd_calibrate)
 
     po = sub.add_parser("one", help="Generate one reflectogram.")
@@ -985,6 +1400,12 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--out-dir", type=str, required=True)
     add_output_args(pb)
     pb.set_defaults(func=cmd_batch)
+
+    pp = sub.add_parser("profile", help="Generate one reflectogram from a z-area profile CSV.")
+    pp.add_argument("--profile-csv", type=str, required=True, help="CSV with columns: z_m, area_m2")
+    pp.add_argument("--out", type=str, required=True)
+    add_output_args(pp)
+    pp.set_defaults(func=cmd_profile)
 
     pt = sub.add_parser("template", help="Write a CSV template for batch generation.")
     pt.add_argument("--out", type=str, required=True)

@@ -9,6 +9,7 @@ The package implements a transparent one-dimensional impedance-change model, ren
 ## Main features
 
 - Generate synthetic LSPIT reflectogram images from explicit defect parameters.
+- Generate reflectograms from user-defined axial area-profile CSV files.
 - Support `Rectangular`, `Round`, and `Triangular` defect-envelope families.
 - Model local cross-sectional changes as signed percentage variations.
 - Use a simplified one-dimensional impedance-change formulation.
@@ -35,8 +36,11 @@ ReflectoGen/
 ├── requirements-dev.txt            # Development/test dependencies
 ├── examples/
 │   ├── params.csv                  # Batch-generation template example
+│   ├── example_area_profile.csv    # User-defined area-profile example
 │   ├── example_commands.sh         # Copy-pasteable CLI workflow
-│   └── make_demo_archive.py        # Creates a small demo archive for calibration tests
+│   ├── make_demo_archive.py        # Creates a small demo archive for calibration tests
+│   ├── run_sanity_checks.py        # Controlled response-behavior checks
+│   └── run_loss_weight_sensitivity.py # Lightweight calibration-loss weighting check
 ├── tests/
 │   └── test_generator_smoke.py     # Minimal import, CLI, and calibration smoke tests
 ├── docs/
@@ -76,13 +80,14 @@ The core generator requires:
 
 ## Command-line interface
 
-ReflectoGen provides four subcommands:
+ReflectoGen provides five subcommands. The following lines show the available subcommands only; each subcommand requires its own arguments, as shown in the complete runnable examples below.
 
 ```bash
-python reflectogen.py template
-python reflectogen.py one
-python reflectogen.py batch
-python reflectogen.py calibrate
+python reflectogen.py template --help
+python reflectogen.py one --help
+python reflectogen.py batch --help
+python reflectogen.py profile --help
+python reflectogen.py calibrate --help
 ```
 
 After editable installation, the console entry point can also be used:
@@ -150,19 +155,53 @@ python reflectogen.py batch \
 
 The batch command writes one PNG reflectogram per CSV row, optional sidecar CSV files, and `manifest.json`.
 
-## 4. Calibration against an existing archive
 
-Calibration fits selected global generator parameters to an existing reflectogram archive. The archive can be a folder or ZIP file containing images whose filenames follow the required naming convention.
+## 4. Generation from a user-defined area profile
+
+For irregular or multi-anomaly cases, ReflectoGen can synthesize a reflectogram directly from an axial area-profile CSV instead of using the built-in rectangular, round, or triangular envelopes. The CSV must contain `z_m` and `area_m2` columns:
+
+```csv
+z_m,area_m2
+0.0,0.1963495
+10.0,0.1963495
+10.5,0.1500000
+11.0,0.1963495
+30.0,0.1963495
+```
+
+Run:
 
 ```bash
+python reflectogen.py profile \
+  --profile-csv examples/example_area_profile.csv \
+  --out outputs/profile_case.png \
+  --save-signal-csv \
+  --save-profile-csv
+```
+
+This mode exposes the internal impedance engine for user-defined `z`--`A(z)` profiles and is intended for cases where a simple parametric envelope is too restrictive.
+
+## 5. Calibration against an existing archive
+
+Calibration fits selected global generator parameters to an existing reflectogram archive. The archive can be a folder or ZIP file. By default, metadata are parsed from filenames, but an optional metadata CSV can also be supplied for archives whose filenames do not encode the defect parameters.
+
+### Reproducible demo calibration workflow
+
+The repository does not require an external legacy archive to run a calibration smoke test. First create a small demo archive, then use it as the calibration input:
+
+```bash
+python examples/make_demo_archive.py --out outputs/demo_legacy_reflectograms.zip
+
 python reflectogen.py calibrate \
-  --input legacy_reflectograms.zip \
+  --input outputs/demo_legacy_reflectograms.zip \
   --out outputs/calibration_run \
-  --max-images 250 \
-  --stages 3 \
-  --trials-per-stage 80 \
+  --max-images 6 \
+  --stages 2 \
+  --trials-per-stage 20 \
   --seed 42
 ```
+
+For a larger external archive, use the same command pattern and replace the `--input` path with your own folder or ZIP file.
 
 Calibration outputs include:
 
@@ -171,6 +210,7 @@ Calibration outputs include:
 | `best_config.json` | Best calibrated generator configuration |
 | `fit_summary.json` | Summary of calibration loss statistics |
 | `search_history.csv` | Full parameter-search history |
+| `parameter_correlation.csv` | Lightweight correlation diagnostic for searched parameters and loss |
 | `fit_records.csv` | Per-record calibration losses |
 | `fit_preview.png` | Side-by-side target/generated preview |
 
@@ -197,9 +237,11 @@ python reflectogen.py batch \
   --config-json best_config.json
 ```
 
-## Calibration filename convention
+## Calibration metadata
 
-Existing reflectograms used for calibration must follow this filename format:
+### Filename convention
+
+Existing reflectograms used for calibration can follow this filename format:
 
 ```text
 Shape_start_m_end_m_percent_change.png
@@ -214,6 +256,28 @@ Triangular_20.0_21.0_-35.png
 ```
 
 Negative values represent local section loss; positive values represent local section increase.
+
+### Optional metadata CSV
+
+If filenames are inconsistent, calibration metadata can be supplied with `--metadata-csv`. The CSV must contain either `filename` or `relative_path`, plus `shape`, `start_m`, `end_m`, and `percent_change`:
+
+```csv
+filename,shape,start_m,end_m,percent_change
+case_001.png,Rectangular,10.0,10.5,-20
+case_002.png,Round,15.0,15.5,12
+```
+
+Example:
+
+```bash
+python reflectogen.py calibrate \
+  --input legacy_archive.zip \
+  --metadata-csv legacy_metadata.csv \
+  --out outputs/calibration_with_metadata \
+  --max-images 250 \
+  --stages 3 \
+  --trials-per-stage 80
+```
 
 ## Python API example
 
@@ -274,10 +338,32 @@ The generator is controlled by the `GeneratorConfig` dataclass.
 The calibration loss combines pixel-level mean squared error and trace-centerline mean squared error:
 
 ```text
-loss = 0.35 × pixel_mse + 0.65 × trace_mse
+loss = (pixel_weight × pixel_mse + trace_weight × trace_mse) / (pixel_weight + trace_weight)
 ```
 
-The trace term is weighted more strongly to emphasize waveform trajectory agreement.
+The default weights are `pixel_weight = 0.35` and `trace_weight = 0.65`. The trace term is weighted more strongly to emphasize waveform trajectory agreement rather than background-pixel overlap. The weights can be changed from the command line:
+
+```bash
+python reflectogen.py calibrate \
+  --input outputs/demo_legacy_reflectograms.zip \
+  --out outputs/calibration_trace_weighted \
+  --pixel-weight 0.25 \
+  --trace-weight 0.75
+```
+
+
+## Calibration weight sensitivity example
+
+The default calibration loss uses `pixel_weight = 0.35` and `trace_weight = 0.65`. To help users inspect how different weighting choices affect a compact calibration example, run:
+
+```bash
+python examples/run_loss_weight_sensitivity.py \
+  --out outputs/loss_weight_sensitivity.csv \
+  --stages 1 \
+  --trials-per-stage 20
+```
+
+The script creates a small shifted demo archive and writes a CSV table comparing several pixel/trace weighting pairs. It is intended as a lightweight sensitivity diagnostic rather than as a physical validation experiment.
 
 ## Minimal smoke test
 
@@ -296,6 +382,16 @@ The command should create:
 outputs/test_reflectogram.png
 outputs/test_reflectogram.meta.json
 ```
+
+## Sanity-check examples
+
+The `examples/run_sanity_checks.py` script generates a compact CSV table showing how simple response descriptors change under controlled variations of defect location, length, sign, and magnitude:
+
+```bash
+python examples/run_sanity_checks.py --out outputs/sanity_checks.csv
+```
+
+The script is intended as a lightweight reproducibility and plausibility check, not as field validation.
 
 ## Intended applications
 
@@ -316,6 +412,7 @@ ReflectoGen is designed for:
 - It does not reproduce proprietary commercial software exactly.
 - It does not replace field validation or high-fidelity numerical simulation.
 - Calibration improves similarity to a given archive but does not guarantee physical equivalence.
+- Metadata can be supplied by filename convention or metadata CSV; automatic inference of defect parameters from unlabeled images is outside the current scope.
 - Generated reflectograms should be interpreted as controlled synthetic research data.
 
 ## Citation
@@ -327,13 +424,13 @@ If you use ReflectoGen in a publication, please cite the archived software relea
   title     = {ReflectoGen: Physics-Inspired and Calibration-Enabled Reflectogram Synthesis for Pile Integrity Testing},
   author    = {Canbula, Bora and Öztürk, Övünç and Özacar, Vehbi and Özacar, Tuğba},
   year      = {2026},
-  version   = {1.0.0},
+  version   = {1.0.1},
   publisher = {Zenodo},
   url       = {https://github.com/canbula/ReflectoGen}
 }
 ```
 
-Replace the citation URL/DOI with the Zenodo DOI after archiving the `v1.0.0` release.
+Replace the citation URL/DOI with the Zenodo DOI after archiving the `v1.0.1` release.
 
 ## License
 
