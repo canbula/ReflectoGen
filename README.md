@@ -420,17 +420,21 @@ ReflectoGen is designed for:
 If you use ReflectoGen in a publication, please cite the archived software release and the associated SoftwareX article when available. Citation metadata are provided in `CITATION.cff`.
 
 ```bibtex
-@software{canbula_reflectogen_2026,
-  title     = {ReflectoGen: Physics-Inspired and Calibration-Enabled Reflectogram Synthesis for Pile Integrity Testing},
-  author    = {Canbula, Bora and Öztürk, Övünç and Özacar, Vehbi and Özacar, Tuğba},
-  year      = {2026},
-  version   = {1.0.1},
-  publisher = {Zenodo},
-  url       = {https://github.com/canbula/ReflectoGen}
+@article{REFLECTOGEN2026,
+title = {ReflectoGen: Physics-inspired and calibration-enabled reflectogram synthesis for pile integrity testing},
+journal = {SoftwareX},
+volume = {35},
+pages = {102817},
+year = {2026},
+issn = {2352-7110},
+doi = {https://doi.org/10.1016/j.softx.2026.102817},
+url = {https://www.sciencedirect.com/science/article/pii/S2352711026003092},
+author = {Bora Canbula and Övünç Öztürk and Vehbi Özacar and Tuğba Özacar},
+keywords = {Low-strain pile integrity testing, Synthetic reflectogram generation, Calibration-enabled software, Physics-inspired modeling, Python scientific software, Benchmark data generation},
+abstract = {ReflectoGen is a calibration-enabled Python software package for synthetic reflectogram generation in low-strain pile integrity testing (LSPIT). The software implements a physics-inspired one-dimensional impedance-based formulation in which local cross-sectional variations are converted into reflection impulses, convolved with a Ricker source wavelet, attenuated in time, normalized, and rendered as grayscale reflectograms. Rectangular, round, and triangular defect morphologies are supported, and the software can generate single cases, batch datasets, waveform CSV files, and section-profile CSV files through a command-line workflow. To support reuse of legacy datasets when proprietary tools are unavailable, ReflectoGen also provides a calibration module that fits global parameters against existing reflectogram archives stored in folders or archive files, using either filename-derived or metadata-CSV-derived defect descriptions together with a combined image- and trace-based similarity criterion. The revised release also exposes configurable calibration-loss weights, writes a parameter-correlation diagnostic, and includes lightweight sanity-check scripts for controlled changes in defect position, length, sign, and magnitude. The software is intended for synthetic benchmark construction, ablation studies, machine-learning dataset generation, and reproducible method development in pile integrity assessment. By combining transparent parameter control with archive-based calibration, ReflectoGen provides a practical and extensible framework for generating synthetic LSPIT reflectograms when access to proprietary generation tools is limited.}
 }
-```
 
-Replace the citation URL/DOI with the Zenodo DOI after archiving the `v1.0.1` release.
+```
 
 ## License
 
